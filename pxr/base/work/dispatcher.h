@@ -33,8 +33,15 @@
 #include "pxr/base/tf/errorMark.h"
 #include "pxr/base/tf/errorTransport.h"
 
+// Blocked range is not used in this file, but this header happens to pull in
+// the TBB version header in a way that works in all TBB versions.
+#include <tbb/blocked_range.h>
 #include <tbb/concurrent_vector.h>
+#if TBB_INTERFACE_VERSION_MAJOR >= 12
+#include <tbb/task_group.h>
+#else
 #include <tbb/task.h>
+#endif
 
 #include <functional>
 #include <type_traits>
@@ -75,18 +82,18 @@ PXR_NAMESPACE_OPEN_SCOPE
 class WorkDispatcher
 {
 public:
-    /// Construct a new dispatcher.
-    WORK_API WorkDispatcher();
+	/// Construct a new dispatcher.
+	WORK_API WorkDispatcher();
 
-    /// Wait() for any pending tasks to complete, then destroy the dispatcher.
-    WORK_API ~WorkDispatcher();
+	/// Wait() for any pending tasks to complete, then destroy the dispatcher.
+	WORK_API ~WorkDispatcher() noexcept; // noexcept needed for tbb::task_group
 
-    WorkDispatcher(WorkDispatcher const &) = delete;
-    WorkDispatcher &operator=(WorkDispatcher const &) = delete;
+	WorkDispatcher(WorkDispatcher const &) = delete;
+	WorkDispatcher &operator=(WorkDispatcher const &) = delete;
 
 #ifdef doxygen
 
-    /// Add work for the dispatcher to run.
+	/// Add work for the dispatcher to run.
     ///
     /// Before a call to Wait() is made it is safe for any client to invoke
     /// Run().  Once Wait() is invoked, it is \b only safe to invoke Run() from
@@ -101,86 +108,130 @@ public:
 
 #else // doxygen
 
-    template <class Callable>
-    inline void Run(Callable &&c) {
-        _rootTask->spawn(_MakeInvokerTask(std::forward<Callable>(c)));
-    }
+	template <class Callable>
+	inline void Run(Callable &&c) {
+#if TBB_INTERFACE_VERSION_MAJOR >= 12
+		_taskGroup.run(std::move(_InvokerTask<typename std::remove_reference<Callable>::type>(std::move(c), &_errors)));
+#else
+		_rootTask->spawn(_MakeInvokerTask(std::forward<Callable>(c)));
+#endif
+	}
 
-    template <class Callable, class A0, class ... Args>
-    inline void Run(Callable &&c, A0 &&a0, Args&&... args) {
-        Run(std::bind(std::forward<Callable>(c),
-                      std::forward<A0>(a0),
-                      std::forward<Args>(args)...));
-    }
-    
+	template <class Callable, class A0, class ... Args>
+	inline void Run(Callable &&c, A0 &&a0, Args&&... args) {
+		Run(std::bind(std::forward<Callable>(c),
+					  std::forward<A0>(a0),
+					  std::forward<Args>(args)...));
+	}
+
 #endif // doxygen
 
-    /// Block until the work started by Run() completes.
-    WORK_API void Wait();
+	/// Block until the work started by Run() completes.
+	WORK_API void Wait();
 
-    /// Cancel remaining work and return immediately.
-    ///
-    /// Calling this function affects task that are being run directly
-    /// by this dispatcher. If any of these tasks are using their own
-    /// dispatchers to run tasks, these dispatchers will not be affected
-    /// and these tasks will run to completion, unless they are also
-    /// explicitly cancelled.
-    ///
-    /// This call does not block.  Call Wait() after Cancel() to wait for
-    /// pending tasks to complete.
-    WORK_API void Cancel();
+	/// Cancel remaining work and return immediately.
+	///
+	/// Calling this function affects task that are being run directly
+	/// by this dispatcher. If any of these tasks are using their own
+	/// dispatchers to run tasks, these dispatchers will not be affected
+	/// and these tasks will run to completion, unless they are also
+	/// explicitly cancelled.
+	///
+	/// This call does not block.  Call Wait() after Cancel() to wait for
+	/// pending tasks to complete.
+	WORK_API void Cancel();
 
 private:
-    typedef tbb::concurrent_vector<TfErrorTransport> _ErrorTransports;
+	typedef tbb::concurrent_vector<TfErrorTransport> _ErrorTransports;
 
-    // Function invoker helper that wraps the invocation with an ErrorMark so we
-    // can transmit errors that occur back to the thread that Wait() s for tasks
-    // to complete.
-    template <class Fn>
-    struct _InvokerTask : public tbb::task {
-        explicit _InvokerTask(Fn &&fn, _ErrorTransports *err) 
-            : _fn(std::move(fn)), _errors(err) {}
+	// Function invoker helper that wraps the invocation with an ErrorMark so we
+	// can transmit errors that occur back to the thread that Wait() s for tasks
+	// to complete.
+#if TBB_INTERFACE_VERSION_MAJOR >= 12
+	template <class Fn>
+    struct _InvokerTask {
+        explicit _InvokerTask(Fn &&fn, _ErrorTransports *err)
+            : _fn(std::make_unique<Fn>(std::move(fn))), _errors(err) {}
 
-        explicit _InvokerTask(Fn const &fn, _ErrorTransports *err) 
-            : _fn(fn), _errors(err) {}
+        explicit _InvokerTask(Fn const &fn, _ErrorTransports *err)
+            : _fn(std::make_unique<Fn>(std::move(fn))), _errors(err) {}
 
-        virtual tbb::task* execute() {
+        // Ensure only moves happen, no copies or assignments.
+        _InvokerTask(_InvokerTask &&other) = default;
+        _InvokerTask(const _InvokerTask &other) = delete;
+        _InvokerTask &operator=(const _InvokerTask &other) = delete;
+        _InvokerTask &operator=(_InvokerTask &&other) = delete;
+
+        void operator()() const {
             TfErrorMark m;
-            _fn();
+            (*_fn)();
             if (!m.IsClean())
                 WorkDispatcher::_TransportErrors(m, _errors);
-            return NULL;
         }
     private:
-        Fn _fn;
+        std::unique_ptr<Fn> _fn;
         _ErrorTransports *_errors;
     };
+#else
+	template <class Fn>
+	struct _InvokerTask : public tbb::task {
+		explicit _InvokerTask(Fn &&fn, _ErrorTransports *err)
+				: _fn(std::move(fn)), _errors(err) {}
 
-    // Make an _InvokerTask instance, letting the function template deduce Fn.
-    template <class Fn>
-    _InvokerTask<typename std::remove_reference<Fn>::type>&
-    _MakeInvokerTask(Fn &&fn) { 
-        return *new( _rootTask->allocate_additional_child_of(*_rootTask) )
-            _InvokerTask<typename std::remove_reference<Fn>::type>(
-                std::forward<Fn>(fn), &_errors);
-    }
+		explicit _InvokerTask(Fn const &fn, _ErrorTransports *err)
+				: _fn(fn), _errors(err) {}
 
-    // Helper function that removes errors from \p m and stores them in a new
-    // entry in \p errors.
-    WORK_API static void
-    _TransportErrors(const TfErrorMark &m, _ErrorTransports *errors);
+		virtual tbb::task* execute() {
+			TfErrorMark m;
+			_fn();
+			if (!m.IsClean())
+				WorkDispatcher::_TransportErrors(m, _errors);
+			return NULL;
+		}
+	private:
+		Fn _fn;
+		_ErrorTransports *_errors;
+	};
 
-    // Task group context and associated root task that allows us to cancel
-    // tasks invoked directly by this dispatcher.
-    tbb::task_group_context _context;
-    tbb::empty_task* _rootTask;
+	// Make an _InvokerTask instance, letting the function template deduce Fn.
+	template <class Fn>
+	_InvokerTask<typename std::remove_reference<Fn>::type>&
+	_MakeInvokerTask(Fn &&fn) {
+		return *new( _rootTask->allocate_additional_child_of(*_rootTask) )
+				_InvokerTask<typename std::remove_reference<Fn>::type>(
+				std::forward<Fn>(fn), &_errors);
+	}
+#endif
 
-    // The error transports we use to transmit errors in other threads back to
-    // this thread.
-    _ErrorTransports _errors;
+	// Helper function that removes errors from \p m and stores them in a new
+	// entry in \p errors.
+	WORK_API static void
+	_TransportErrors(const TfErrorMark &m, _ErrorTransports *errors);
 
-    // Concurrent calls to Wait() have to serialize certain cleanup operations.
-    std::atomic_flag _waitCleanupFlag;
+	// Task group context to run tasks in.
+	tbb::task_group_context _context;
+#if TBB_INTERFACE_VERSION_MAJOR >= 12
+	// Custom task group that lets us implement thread safe concurrent wait.
+    class _TaskGroup : public tbb::task_group {
+    public:
+        _TaskGroup(tbb::task_group_context& ctx) : tbb::task_group(ctx) {}
+        tbb::detail::d1::wait_context& get_internal_wait_context() {
+            return m_wait_ctx;
+        }
+    };
+
+    _TaskGroup _taskGroup;
+#else
+	// Root task that allows us to cancel tasks invoked directly by this dispatcher.
+	tbb::empty_task* _rootTask;
+#endif
+
+	// The error transports we use to transmit errors in other threads back to
+	// this thread.
+	_ErrorTransports _errors;
+
+	// Concurrent calls to Wait() have to serialize certain cleanup operations.
+	std::atomic_flag _waitCleanupFlag;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -142,6 +142,10 @@ TF_REGISTRY_FUNCTION(TfType)
     t.SetFactory< HioImageFactory<Image> >();
 }
 
+#ifdef __EMSCRIPTEN__
+void forceHioStbInitialization() {}
+#endif
+
 bool
 Hio_StbImage::_IsValidCrop(int cropTop, int cropBottom, int cropLeft, int cropRight)
 {

@@ -112,5 +112,8 @@ UsdShadersDiscoveryPlugin::DiscoverNodes(const Context &context)
 
 NDR_REGISTER_DISCOVERY_PLUGIN(UsdShadersDiscoveryPlugin);
 
+#ifdef __EMSCRIPTEN__
+void forceUsdShadersDiscoveryInitialization() {}
+#endif
 
 PXR_NAMESPACE_CLOSE_SCOPE

@@ -155,4 +155,8 @@ UsdShadeShaderDefParserPlugin::GetSourceType() const
 
 NDR_REGISTER_PARSER_PLUGIN(UsdShadeShaderDefParserPlugin);
 
+#ifndef __EMSCRIPTEN__
+void forcUsdShadeShaderDefParserInitialization() {}
+#endif
+
 PXR_NAMESPACE_CLOSE_SCOPE

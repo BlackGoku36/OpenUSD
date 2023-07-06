@@ -39,6 +39,10 @@ TF_REGISTRY_FUNCTION(TfType)
     SDF_DEFINE_FILE_FORMAT(UsdUsdaFileFormat, SdfTextFileFormat);
 }
 
+#ifdef __EMSCRIPTEN__
+void forceUSDAInitialization() {}
+#endif
+
 UsdUsdaFileFormat::UsdUsdaFileFormat()
     : SdfTextFileFormat(UsdUsdaFileFormatTokens->Id,
                         UsdUsdaFileFormatTokens->Version,

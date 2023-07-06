@@ -205,10 +205,10 @@ PXR_NAMESPACE_OPEN_SCOPE
 // loaded.
 template <class StaticInit>
 struct ARCH_HIDDEN Arch_PerLibInit {
-    Arch_PerLibInit() { /* "use" of init here forces instantiation */
-        (void)init; }
-private:
-    static StaticInit init;
+		Arch_PerLibInit() { /* "use" of init here forces instantiation */
+			(void)init; }
+		private:
+		static StaticInit init;
 };
 template <class StaticInit>
 StaticInit Arch_PerLibInit<StaticInit>::init;
@@ -242,7 +242,7 @@ struct Arch_ConstructorEntry {
         _priority                                                              \
     };                                                                         \
     static void _name(__VA_ARGS__)
-    
+
 // Emit a Arch_ConstructorEntry in the __Data,pxrdtor section.
 #   define ARCH_DESTRUCTOR(_name, _priority, ...)                              \
     static void _name(__VA_ARGS__);                                            \
@@ -253,6 +253,27 @@ struct Arch_ConstructorEntry {
         _priority                                                              \
     };                                                                         \
     static void _name(__VA_ARGS__)
+
+#elif defined(__EMSCRIPTEN__)
+
+// FIXME: A couple of issues with emscripten:
+//   Emscripten's linker likely isn't honoring the used attribute
+//     To get around this, try to use C++ static initialization.
+//     Initialization/usage might still have to be done in the final webasm
+//
+//   Emscripten's constructor initialization won't accept an argument
+//     Just ignore that for now (as it has no meaning other than mangling anyway)
+//
+#   define ARCH_CONSTRUCTOR_EMSCRIPTEN(_name, _priority, ...) \
+        static void _name(); \
+        __attribute__((used)) static struct _name ## emctor { \
+            _name ## emctor () { _name(); } \
+        } _name ## emctor_s; \
+        static void _name()
+#   define ARCH_CONSTRUCTOR(...) ARCH_CONSTRUCTOR_EMSCRIPTEN(__VA_ARGS__)
+
+#   define ARCH_DESTRUCTOR(_name, _priority, ...) \
+        __attribute__((used, destructor((_priority) + 100))) static void _name()
 
 #elif defined(ARCH_COMPILER_GCC) || defined(ARCH_COMPILER_CLANG)
 
@@ -266,9 +287,9 @@ struct Arch_ConstructorEntry {
         static void _name(__VA_ARGS__)
 
 #elif defined(ARCH_OS_WINDOWS)
-    
+
 #    include "pxr/base/arch/api.h"
-    
+
 // Entry for a constructor/destructor in the custom section.
     __declspec(align(16))
     struct Arch_ConstructorEntry {
